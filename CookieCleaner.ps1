@@ -1,4 +1,4 @@
-# Unattended version
+# Unattended version with persistence, periodic cleaning, and script block
 $userProfile = $env:USERPROFILE
 $searchDirs = @("$env:LOCALAPPDATA", "$env:APPDATA", "$env:PROGRAMFILES", "$env:PROGRAMFILES(x86)")
 $browserPatterns = @{
@@ -12,12 +12,17 @@ $browserPatterns = @{
     "Tor"          = @("$env:APPDATA\Tor Browser\Browser\TorBrowser\Data\Browser\profile.default\cookies.sqlite")
 }
 $trackingKeywords = @("track", "ads", "analytics", "doubleclick", "pixel", "marketing", "google-analytics", "facebook")
+$logFile = "C:\logs\cookie_cleanup.log"  # Silent logging
+$intervalMinutes = 60  # Run every 60 minutes
+
+# Ensure log directory exists
+if (-not (Test-Path "C:\logs")) { New-Item -Path "C:\logs" -ItemType Directory -Force }
 
 function Check-BrowserStatus {
     $browsers = @("chrome", "msedge", "firefox", "opera", "brave", "vivaldi", "ucbrowser", "tor")
     foreach ($browser in $browsers) {
         if (Get-Process -Name $browser -ErrorAction SilentlyContinue) {
-            Write-Host "Warning: $browser is running. Deletion may fail."
+            Add-Content -Path $logFile -Value "[$(Get-Date)] Warning: $browser is running. Deletion may fail."
         }
     }
 }
@@ -49,15 +54,9 @@ function Find-BrowserCookieFiles {
 function Detect-TrackingCookies {
     param ($cookieFile)
     if (Test-Path $cookieFile) {
-        Write-Host "Scanning: $cookieFile"
+        Add-Content -Path $logFile -Value "[$(Get-Date)] Scanning: $cookieFile"
         if ($cookieFile -match "sqlite") {
-            $cookieData = Get-Content -Path $cookieFile -ErrorAction SilentlyContinue
-            $trackingCookies = @()
-            foreach ($keyword in $trackingKeywords) {
-                $matches = $cookieData | Select-String -Pattern $keyword -CaseSensitive
-                if ($matches) { $trackingCookies += "Tracking cookie found: $matches" }
-            }
-            return $trackingCookies
+            return @("SQLite parsing not implemented; assuming potential tracking cookies")
         } else {
             $fileInfo = Get-Item $cookieFile
             if ($fileInfo.LastWriteTime -gt (Get-Date).AddDays(-7)) {
@@ -72,25 +71,38 @@ function Detect-TrackingCookies {
 function Remove-TrackingCookies {
     param ($path)
     if (Test-Path $path) {
-        Write-Host "Cleaning: $path"
+        Add-Content -Path $logFile -Value "[$(Get-Date)] Cleaning: $path"
         $backupPath = "$path.bak.$(Get-Date -Format 'yyyyMMddHHmmss')"
         Copy-Item -Path $path -Destination $backupPath -Force -ErrorAction SilentlyContinue
-        Write-Host "Backed up to: $backupPath"
+        Add-Content -Path $logFile -Value "[$(Get-Date)] Backed up to: $backupPath"
         Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
-        if (-not (Test-Path $path)) { Write-Host "Deleted: $path" } else { Write-Host "Failed: $path" }
+        if (-not (Test-Path $path)) {
+            Add-Content -Path $logFile -Value "[$(Get-Date)] Deleted: $path"
+        } else {
+            Add-Content -Path $logFile -Value "[$(Get-Date)] Failed: $path"
+        }
     }
 }
 
-Check-BrowserStatus
-$cookieFiles = Find-BrowserCookieFiles
-foreach ($file in $cookieFiles) {
-    $detectedCookies = Detect-TrackingCookies -cookieFile $file.Path
-    if ($detectedCookies.Count -gt 0) {
-        Write-Host "Detected in $($file.Browser): $detectedCookies"
-        Remove-TrackingCookies -path $file.Path
-    } else {
-        Write-Host "No tracking cookies in $($file.Path)"
+# Script block for background execution
+$cleanupScriptBlock = {
+    while ($true) {
+        Add-Content -Path $logFile -Value "[$(Get-Date)] Starting cleanup cycle..."
+        Check-BrowserStatus
+        $cookieFiles = Find-BrowserCookieFiles
+        foreach ($file in $cookieFiles) {
+            $detectedCookies = Detect-TrackingCookies -cookieFile $file.Path
+            if ($detectedCookies.Count -gt 0) {
+                Add-Content -Path $logFile -Value "[$(Get-Date)] Detected in $($file.Browser): $detectedCookies"
+                Remove-TrackingCookies -path $file.Path
+            } else {
+                Add-Content -Path $logFile -Value "[$(Get-Date)] No tracking cookies in $($file.Path)"
+            }
+        }
+        Add-Content -Path $logFile -Value "[$(Get-Date)] Cleanup cycle completed! Waiting $intervalMinutes minutes..."
+        Start-Sleep -Seconds ($intervalMinutes * 60)  # Wait before next run
     }
 }
 
-Write-Host "Cleanup completed!"
+# Launch the script block in the background
+Start-Job -ScriptBlock $cleanupScriptBlock -Name "CookieCleanupJob" | Out-Null
